@@ -23,6 +23,125 @@ Validation works with Zod, Valibot, ArkType or any other Standard Schema library
 
 Nest's packages are ESM only, and this project is ESM too: relative imports end in `.js`, `__dirname` doesn't exist (use `import.meta.dirname`), and tests run on Vitest, so mocks are `vi.fn()`, not `jest.fn()`.
 
+## Logging
+
+**Never use `console.log`, `console.warn`, `console.error`, or any other `console.*` method.** This app has a custom `AppLoggerService` that must be used for all logging.
+
+### Injecting the logger
+
+`LoggerModule` is `@Global()`, so inject `AppLoggerService` directly — no need to import the module:
+
+```ts
+import { AppLoggerService, LogEvent } from '../common/logger/index.js';
+
+@Injectable()
+export class MyService {
+  constructor(private readonly logger: AppLoggerService) {}
+}
+```
+
+### Logging methods
+
+Every method accepts `(message, event, context?)`. Always pass the most specific `LogEvent` for the domain:
+
+```ts
+this.logger.log('Usuario creado',       LogEvent.USER,       MyService.name);
+this.logger.warn('Token expirado',      LogEvent.AUTH,       MyService.name);
+this.logger.error('Fallo en DB', LogEvent.DATABASE, MyService.name, error.stack);
+this.logger.debug('Payload recibido',   LogEvent.HTTP,       MyService.name);
+this.logger.verbose('Query ejecutada',  LogEvent.DATABASE,   MyService.name);
+```
+
+### Available `LogEvent` categories
+
+| Event | Use for |
+|---|---|
+| `LogEvent.BOOTSTRAP` | App startup |
+| `LogEvent.DATABASE` | DB connections, slow queries |
+| `LogEvent.HTTP` | Requests / responses |
+| `LogEvent.AUTH` | Login, registration, tokens |
+| `LogEvent.RESTAURANT` | Restaurant CRUD |
+| `LogEvent.USER` | User CRUD |
+| `LogEvent.ORDER` | Orders |
+| `LogEvent.SECURITY` | Unauthorized access attempts |
+| `LogEvent.VALIDATION` | DTO validation errors |
+| `LogEvent.SYSTEM` | Generic / fallback |
+
+### Rules
+
+- Always pass `ClassName.name` (or a descriptive string) as the `context` third argument.
+- Use `LogEvent.SECURITY` (not `HTTP`) for 401/403 errors.
+- Use `LogEvent.SYSTEM` only as a last resort when no other category fits.
+- In production, only `SECURITY`, `SYSTEM`, and `AUTH` events are logged by default — don't rely on `HTTP` or `DATABASE` logs being visible in prod.
+
+## Error Handling
+
+This app has a typed error propagation system. **Never throw raw `Error` objects or Nest's built-in exceptions from service/domain code** — use the classes in `src/common/errors/` so the global filter can log them with the right category and return a consistent HTTP response.
+
+### How it works
+
+The `AllExceptionsFilter` (registered globally in `main.ts`) catches every unhandled exception and classifies it in this order:
+
+1. **`AppError` subclass** → reads `statusCode`, `logEvent`, and `logLevel` from the error itself — no extra config needed.
+2. **`HttpException` (Nest built-ins)** → still supported; use only in controllers, never in services.
+3. **`QueryFailedError` (TypeORM)** → automatically maps PostgreSQL error codes to HTTP status (23505 → 409, 23503 → 409, etc.) and logs with `LogEvent.DATABASE`.
+4. **Unknown `Error`** → 500 with `LogEvent.SYSTEM`.
+
+### Available error classes
+
+Import from `'../common/errors/index.js'`:
+
+```ts
+import {
+  ResourceNotFoundError,
+  ConflictDomainError,
+  ForbiddenDomainError,
+  UnprocessableError,
+  DatabaseError,
+  ExternalServiceError,
+} from '../common/errors/index.js';
+```
+
+| Class | HTTP | logLevel | logEvent (default) | When to use |
+|---|---|---|---|---|
+| `ResourceNotFoundError` | 404 | warn | SYSTEM (override via constructor) | Entity not found in DB |
+| `ConflictDomainError` | 409 | warn | SYSTEM (override via constructor) | Duplicate slug, business rule conflict |
+| `ForbiddenDomainError` | 403 | warn | SECURITY (fixed) | Business-level authorization failure |
+| `UnprocessableError` | 422 | warn | VALIDATION (fixed) | Domain validation beyond DTO |
+| `DatabaseError` | 500 | error | DATABASE (fixed) | Wrap unexpected TypeORM errors |
+| `ExternalServiceError` | 502 | error | SYSTEM (fixed) | Third-party API failure |
+
+### Usage in services
+
+Always pass the domain's `LogEvent` so the filter logs it in the right category:
+
+```ts
+import { ResourceNotFoundError, ConflictDomainError, DatabaseError } from '../common/errors/index.js';
+import { LogEvent } from '../common/logger/index.js';
+
+// 404 — logged as RESTAURANT
+throw new ResourceNotFoundError('Restaurante no encontrado', LogEvent.RESTAURANT);
+
+// 409 — logged as RESTAURANT
+throw new ConflictDomainError(`El slug "${slug}" ya está en uso`, LogEvent.RESTAURANT);
+
+// 403 — always logged as SECURITY
+throw new ForbiddenDomainError('Solo el dueño puede modificar este restaurante');
+
+// Wrap an unexpected infrastructure error — logged as DATABASE with stack trace
+throw new DatabaseError('No se pudo guardar el restaurante', originalError);
+
+// External API — logged as SYSTEM with stack trace
+throw new ExternalServiceError('Timeout al procesar pago', 'Stripe', originalError);
+```
+
+### Rules
+
+- **Services and domain code**: always throw `AppError` subclasses. Never throw Nest's `NotFoundException`, `ConflictException`, etc. from a service — those are HTTP concepts.
+- **Controllers**: may throw `HttpException` subclasses if truly needed, but prefer delegating to the service.
+- **Never wrap errors with `try/catch` just to re-throw as 500** — let the filter handle unknown errors automatically.
+- TypeORM unique-constraint violations (23505) are caught automatically; only use `DatabaseError` when you need to add context or the error is from a custom query.
+
 ## Production data: NestJS Observe
 
 This app's production telemetry - traces, errors, logs and metrics - goes to [NestJS Observe](https://observe.nestjs.com). Until `ObserveModule` is registered in `src/app.module.ts`, nothing is sent: `npx @nestjs/observe link` sets it up in one step - it installs `@nestjs/observe`, wires it into the app, and writes the key pair (`OBSERVE_APP_KEY`, `OBSERVE_APP_SECRET`) to `.env`.

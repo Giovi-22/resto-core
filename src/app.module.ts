@@ -6,9 +6,14 @@ import { AuthModule } from './modules/auth/auth.module.js';
 import { RestaurantsModule } from './modules/restaurants/restaurants.module.js';
 import { User } from './modules/users/entities/user.entity.js';
 import { Restaurant } from './modules/restaurants/entities/restaurant.entity.js';
+import { LoggerModule } from './common/logger/index.js';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
 
 @Module({
   imports: [
+    // ─── Logger global ────────────────────────────────────────────
+    LoggerModule,
+
     // ─── Config global ────────────────────────────────────────────
     ConfigModule.forRoot({
       isGlobal: true,
@@ -36,5 +41,6 @@ import { Restaurant } from './modules/restaurants/entities/restaurant.entity.js'
     AuthModule,
     RestaurantsModule,
   ],
+  providers: [AllExceptionsFilter],
 })
 export class AppModule {}

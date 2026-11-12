@@ -6,9 +6,15 @@ import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module.js';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor.js';
+import { AppLoggerService, LogEvent } from './common/logger/index.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+
+  // ─── Logger propio como sistema de Nest ───────────────────────
+  const logger = app.get(AppLoggerService);
+  app.useLogger(logger);
+
   const config = app.get(ConfigService);
   const reflector = app.get(Reflector);
 
@@ -36,7 +42,8 @@ async function bootstrap() {
   );
 
   // ─── Interceptors y Filters globales ─────────────────────────
-  app.useGlobalFilters(new AllExceptionsFilter());
+  const exceptionFilter = app.get(AllExceptionsFilter);
+  app.useGlobalFilters(exceptionFilter);
   app.useGlobalInterceptors(
     new ClassSerializerInterceptor(reflector),
     new ResponseInterceptor(),
@@ -63,8 +70,8 @@ async function bootstrap() {
   const port = config.get<number>('PORT', 3000);
   await app.listen(port);
 
-  console.log(`\n🍽️  GastroManager API corriendo en: http://localhost:${port}/${apiPrefix}`);
-  console.log(`📚  Swagger UI: http://localhost:${port}/docs\n`);
+  logger.log(`🍽️  GastroManager API corriendo en: http://localhost:${port}/${apiPrefix}`, LogEvent.BOOTSTRAP);
+  logger.log(`📚  Swagger UI: http://localhost:${port}/docs`, LogEvent.BOOTSTRAP);
 }
 
 await bootstrap();
