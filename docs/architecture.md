@@ -94,16 +94,21 @@ erDiagram
     ORDER {
         uuid id PK
         int number
-        enum status
-        enum type
+        enum status        "PENDING_PAYMENT|OPEN|SENT_TO_KITCHEN|IN_PROGRESS|READY|DELIVERED|PAID|CANCELLED|EXPIRED"
+        enum type          "DINE_IN|SELF_ORDER|TAKEOUT|DELIVERY"
+        enum origin        "STAFF|QR|EXTERNAL_APP"
         string notes
         decimal subtotal
         decimal tax
         decimal total
         uuid tableId FK
         uuid restaurantId FK
-        uuid waiterId FK
+        uuid waiterId FK   "nullable para SELF_ORDER y QR"
+        string externalPaymentRef  "ID de pago en MP u otra pasarela"
+        jsonb pushSubscription     "suscripción PWA del browser del comensal"
+        string customerPhone       "opcional, para notificaciones WhatsApp/SMS"
         datetime closedAt
+        datetime expiresAt         "para limpiar PENDING_PAYMENT abandonadas"
     }
 
     ORDER_ITEM {
@@ -286,7 +291,61 @@ sequenceDiagram
     API-->>Cliente: 200 data  |  403 Forbidden
 ```
 
-### 3.3 — Flujo de apertura y cierre de caja
+### 3.3 — Flujo de auto-pedido vía QR (comensal sin mozo)
+
+```mermaid
+sequenceDiagram
+    actor Comensal
+    participant Carta as Carta Online (PWA)
+    participant API as GastroManager API
+    participant MP as Mercado Pago
+    participant Kitchen as Kitchen Display
+
+    Comensal->>Carta: Escanea QR de mesa → abre carta
+    Carta->>API: GET /public/:slug/session?tableId=5
+    API-->>Carta: { sessionToken, activeOrder: null }
+
+    Comensal->>Carta: Arma pedido y presiona "Pagar"
+    Carta->>API: POST /public/:slug/orders { tableId, items[], pushSubscription }
+    API-->>Carta: { orderId, total, status: PENDING_PAYMENT, expiresAt }
+
+    Note over Carta: Guarda orderId en localStorage + URL de retorno
+    Carta->>Comensal: Redirige a Mercado Pago
+
+    Comensal->>MP: Completa el pago
+    MP->>API: Webhook POST /webhooks/mercadopago { payment_id, external_reference: orderId }
+    API->>API: Valida firma del webhook
+    API->>API: Actualiza orden → status: OPEN
+    API-->>Kitchen: emit('new-order', order) via WebSocket
+    MP-->>Carta: Redirige a back_url?orderId=xxx&payment_id=yyy
+
+    Carta->>API: GET /public/:slug/orders/:orderId
+    API-->>Carta: { status: OPEN, ... }
+    Carta-->>Comensal: "¡Pedido confirmado! Lo estamos preparando 🍽️"
+
+    Note over API,Kitchen: Cocina ve el pedido recién después del pago
+
+    API->>Comensal: Push Notification "Tu pedido está listo 🔔"
+```
+
+### 3.4 — Sesión de mesa y manejo de concurrencia (QR como ancla)
+
+La URL del QR **nunca cambia** (es una calcomanía física en la mesa). La "sesión activa" se determina server-side por el estado de la orden más reciente de esa mesa:
+
+```mermaid
+flowchart TD
+    A["Comensal escanea QR mesa 5"] --> B{"¿Existe orden activa\npara mesa 5?"}
+    B -- "No (mesa libre)" --> C["Nueva sesión — mostrar menú vacío"]
+    B -- "Sí, status=PENDING_PAYMENT\ny createdAt < 30min" --> D["Continuar sesión\n(mismo comensal volvió)"]
+    B -- "Sí, status=PENDING_PAYMENT\ny createdAt > 30min" --> E["Job expiró la orden → EXPIRED\nNueva sesión"]
+    B -- "Sí, status=OPEN/IN_PROGRESS/READY" --> F["Mostrar estado del pedido activo\n(mismo comensal volvió)"]
+    B -- "Sí, status=PAID/CANCELLED/EXPIRED" --> C
+```
+
+> [!IMPORTANT]
+> El QR no lleva token de sesión. La sesión la gestiona el backend en base al estado de la última orden de la mesa. Cuando la mesa queda libre (PAID o EXPIRED), el próximo comensal siempre empieza desde cero — sin ver órdenes anteriores.
+
+### 3.5 — Flujo de apertura y cierre de caja
 
 ```mermaid
 sequenceDiagram
@@ -382,6 +441,25 @@ sequenceDiagram
 | `GET` | `/reports/by-waiter` | MANAGER | Ventas por mozo |
 | `GET` | `/reports/cash-register/:id` | CASHIER, MANAGER | Resumen de caja |
 
+### Public API — Carta online y auto-pedido (autenticación por API Key)
+
+> [!NOTE]
+> Estos endpoints son consumidos por la **carta online** desarrollada por un tercero. Requieren una API Key generada por el OWNER del restaurante desde el backoffice. La API Key identifica al restaurante y limita el acceso a sus propios datos públicos.
+
+| Método | Endpoint | Auth | Descripción |
+|--------|----------|------|-------------|
+| `GET` | `/public/:slug/menu` | API Key | Menú completo: categorías + productos + modificadores |
+| `GET` | `/public/:slug/categories` | API Key | Solo categorías activas |
+| `GET` | `/public/:slug/products` | API Key | Productos disponibles (con filtros) |
+| `GET` | `/public/:slug/session` | API Key | Estado de sesión de la mesa (¿hay orden activa?) |
+| `POST` | `/public/:slug/orders` | API Key | Crear orden en estado `PENDING_PAYMENT` |
+| `GET` | `/public/:slug/orders/:id` | API Key | Ver estado de una orden (para polling del cliente) |
+| `POST` | `/webhooks/mercadopago` | Firma MP | Webhook de pago — confirma y activa la orden |
+| `POST` | `/webhooks/generic` | Firma HMAC | Webhook genérico para otras pasarelas de pago |
+
+> [!IMPORTANT]
+> La API Key **nunca debe exponerse en el browser del comensal**. La carta online debe tener un backend propio que actúe de intermediario. Los endpoints `/public/*` son para servidor-a-servidor o para backends de cartas online, no para ser llamados directamente desde el frontend del comensal.
+
 ---
 
 ## 5. Estados y Transiciones
@@ -390,7 +468,11 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> OPEN : POST /orders
+    [*] --> PENDING_PAYMENT : POST /public/:slug/orders (QR / app externa)
+    [*] --> OPEN : POST /orders (mozo)
+
+    PENDING_PAYMENT --> OPEN : Webhook pago confirmado
+    PENDING_PAYMENT --> EXPIRED : Job — sin pago en 30 min
 
     OPEN --> SENT_TO_KITCHEN : send-to-kitchen
     OPEN --> CANCELLED : cancel (MANAGER)
@@ -401,11 +483,15 @@ stateDiagram-v2
 
     DELIVERED --> PAID : createPayment
     PAID --> [*]
+    EXPIRED --> [*]
 
     OPEN --> CANCELLED
     SENT_TO_KITCHEN --> CANCELLED
     IN_PROGRESS --> CANCELLED
 ```
+
+> [!NOTE]
+> `PENDING_PAYMENT` y `EXPIRED` solo aplican a órdenes con `origin = QR` o `EXTERNAL_APP`. El kitchen display **nunca muestra** órdenes en estado `PENDING_PAYMENT` o `EXPIRED`. Las push notifications se envían al pasar a `OPEN` (pago confirmado) y a `READY` (pedido listo).
 
 ### Table Status
 
@@ -451,6 +537,11 @@ stateDiagram-v2
 | R8 | Un usuario pertenece a un solo restaurante a la vez | Users | `UsersService.assignToRestaurant()` |
 | R9 | No se puede cerrar caja si hay pedidos abiertos | CashRegister | `CashRegisterService.close()` |
 | R10 | El precio del ítem se fija al momento de crear el pedido | Orders | `OrdersService.addItem()` |
+| R11 | El kitchen display nunca muestra órdenes `PENDING_PAYMENT` ni `EXPIRED` | Kitchen | `KitchenGateway` — filtrar por estado |
+| R12 | Una orden `PENDING_PAYMENT` expira automáticamente a los 30 min | Orders | Job `@nestjs/schedule` — `OrdersService.expireStale()` |
+| R13 | La sesión de mesa activa es la última orden no expirada/pagada de esa mesa | Orders | `OrdersService.getActiveSessionForTable()` |
+| R14 | Un nuevo comensal nunca ve órdenes anteriores — la sesión se resetea cuando la orden pasa a `PAID`, `CANCELLED` o `EXPIRED` | Orders | `OrdersService.getActiveSessionForTable()` |
+| R15 | La API Key de un restaurante solo puede acceder a los datos de ese restaurante | Public API | `ApiKeyGuard` — valida `restaurantId` del token vs recurso |
 
 ---
 
@@ -477,6 +568,21 @@ stateDiagram-v2
 **Decisión:** En producción usar migraciones TypeORM explícitas.
 **Razón:** `synchronize: true` puede borrar columnas accidentalmente.
 
+### ADR-006: Estado `PENDING_PAYMENT` para desacoplar creación de orden y confirmación de pago
+**Decisión:** Las órdenes creadas desde canales externos (QR, app de carta) nacen en estado `PENDING_PAYMENT` y solo pasan a `OPEN` tras la confirmación del webhook de la pasarela de pago.
+**Alternativa descartada:** Crear la orden directamente en `OPEN` y cancelarla si el pago falla.
+**Razón:** La cocina nunca debe ver un pedido sin pago confirmado. Con `PENDING_PAYMENT` como estado inicial el flujo es atómico: si el webhook no llega en 30 min, la orden expira y la mesa queda libre automáticamente. Elimina la necesidad de almacenamiento temporal externo (Redis, Upstash, etc.).
+
+### ADR-007: La mesa como ancla de sesión (QR estático, sesión server-side)
+**Decisión:** La URL del QR es estática y permanente (`/mesa/5`). La "sesión activa" del comensal se determina consultando la última orden no finalizada de esa mesa.
+**Alternativa descartada:** QR con token rotativo (token embebido en la URL que cambia por sesión).
+**Razón:** Un QR rotativo requiere reemplazar la calcomanía física o usar un QR dinámico de pago. Con sesión server-side el QR puede ser una calcomanía impresa para siempre. El backend determina si hay sesión activa por estado de la orden, no por el token de la URL.
+
+### ADR-008: PWA Push Notifications para estado del pedido
+**Decisión:** La carta online (desarrollada por terceros) debe implementarse como PWA con Service Worker. GastroManager almacena la `pushSubscription` del browser junto con la orden y envía notificaciones push cuando el estado cambia a `OPEN` (pago confirmado) y `READY` (pedido listo).
+**Alternativa descartada:** Polling periódico del cliente al endpoint de estado.
+**Razón:** El Push Notification funciona con el browser/app cerrado, sin costo de infraestructura adicional y sin que el comensal provea datos personales. El polling genera carga innecesaria y no funciona con la app cerrada.
+
 ---
 
 ## 8. Estado de Implementación
@@ -497,5 +603,10 @@ stateDiagram-v2
 | Cash Register | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | Kitchen WS | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | Reports | ⬜ | ⬜ | ⬜ | ⬜ | — |
+| **Public API** | — | ⬜ | ⬜ | ⬜ | — |
+| **API Keys** | ⬜ | ⬜ | ⬜ | ⬜ | — |
+| **Webhooks (MP)** | — | ⬜ | ⬜ | ⬜ | — |
+| **Push Notifications** | — | ⬜ | — | ⬜ | — |
+| **Expire Job (schedule)** | — | ⬜ | — | ⬜ | — |
 
 ✅ Hecho · 🔄 En progreso · ⬜ Pendiente
