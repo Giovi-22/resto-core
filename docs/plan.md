@@ -15,8 +15,9 @@
 | **Auth** | JWT + Passport.js | Stateless, escalable |
 | **Docs** | Swagger / OpenAPI | Auto-generado desde decoradores |
 | **Testing** | Jest + Supertest | Unit + E2E tests integrados con NestJS |
-| **Frontend** | React + Vite + Tailwind | Rápido, moderno |
-| **Estado (FE)** | Zustand o React Query | Ligero, server state |
+| **Frontend (backoffice)** | React + Vite + Material UI (MUI) | Componentes completos listos (DataGrid, formularios, modales, drawers). Sin diseñador dedicado, MUI resuelve el 80% del diseño de un sistema de gestión |
+| **Frontend (carta online)** | Libre elección del developer (Tailwind recomendado) | La carta pública la construye el developer contratado por el restaurante — debe poder reflejar su branding propio |
+| **Estado (FE)** | Zustand + React Query (TanStack Query) | Zustand para estado UI local, React Query para server state y cache |
 | **Realtime** | WebSockets (Socket.io) | Pedidos en tiempo real |
 | **Contenedores** | Docker + docker-compose | Dev/Prod parity |
 
