@@ -94,21 +94,25 @@ erDiagram
     ORDER {
         uuid id PK
         int number
-        enum status        "PENDING_PAYMENT|OPEN|SENT_TO_KITCHEN|IN_PROGRESS|READY|DELIVERED|PAID|CANCELLED|EXPIRED"
-        enum type          "DINE_IN|SELF_ORDER|TAKEOUT|DELIVERY"
-        enum origin        "STAFF|QR|EXTERNAL_APP"
+        enum status            "PENDING_PAYMENT|PAYMENT_REVIEW|OPEN|SENT_TO_KITCHEN|IN_PROGRESS|READY|DELIVERED|PAID|CANCELLED|EXPIRED"
+        enum type              "DINE_IN|SELF_ORDER|TAKEOUT|DELIVERY"
+        enum origin            "STAFF|QR|EXTERNAL_APP"
         string notes
         decimal subtotal
         decimal tax
         decimal total
         uuid tableId FK
         uuid restaurantId FK
-        uuid waiterId FK   "nullable para SELF_ORDER y QR"
-        string externalPaymentRef  "ID de pago en MP u otra pasarela"
-        jsonb pushSubscription     "suscripción PWA del browser del comensal"
-        string customerPhone       "opcional, para notificaciones WhatsApp/SMS"
+        uuid waiterId FK       "nullable para SELF_ORDER y QR"
+        string externalPaymentRef      "ID de pago en MP u otra pasarela"
+        jsonb pushSubscription         "suscripción PWA del browser del comensal"
+        string customerPhone           "opcional, para notificaciones WhatsApp/SMS"
         datetime closedAt
-        datetime expiresAt         "para limpiar PENDING_PAYMENT abandonadas"
+        datetime expiresAt             "para limpiar PENDING_PAYMENT sin externalPaymentRef"
+        enum paymentConfirmationType   "WEBHOOK|MANUAL — cómo se confirmó el pago"
+        uuid paymentConfirmedById FK   "nullable — USER que confirmó manualmente"
+        datetime paymentConfirmedAt    "nullable — cuándo se confirmó"
+        string paymentConfirmedNotes   "nullable — anotaciones del confirmador"
     }
 
     ORDER_ITEM {
@@ -373,6 +377,47 @@ sequenceDiagram
     API-->>Cajero: 200 Resumen del turno
 ```
 
+### 3.6 — Confirmación manual de pago (fallback de webhook)
+
+Cubre el caso en que el webhook falla y el cliente le muestra al mozo el comprobante de pago en su dispositivo.
+
+```mermaid
+sequenceDiagram
+    actor Cliente
+    actor Mozo
+    actor Manager
+    participant Backoffice
+    participant API
+    participant Kitchen as Kitchen Display
+
+    Note over Cliente: Pagó en MP pero la carta se rompió
+    Cliente->>Mozo: "Pagué, tengo el comprobante. Mi orden es la #42"
+    Mozo->>Manager: Avisa de la situación
+
+    Manager->>Backoffice: Abre panel "Órdenes pendientes de revisión"
+    Backoffice->>API: GET /orders?status=PAYMENT_REVIEW
+    API-->>Backoffice: [ { orderNumber: 42, table: 5, total: $1850, externalPaymentRef: "MP-78234" } ]
+
+    Manager->>Backoffice: Verifica MP-78234 en panel de Mercado Pago ✅
+    Manager->>Backoffice: Clic en "Confirmar pago"
+
+    Backoffice->>Manager: Pide contraseña de usuario
+    Manager->>Backoffice: Ingresa contraseña
+
+    Backoffice->>API: POST /orders/42/confirm-payment { password, notes: "Verificado MP-78234" }
+    API->>API: Verifica contraseña del usuario autenticado
+    API->>API: Registra paymentConfirmedById, paymentConfirmedAt, paymentConfirmedNotes
+    API->>API: status PAYMENT_REVIEW → OPEN
+    API-->>Kitchen: emit('new-order', order) via WebSocket
+    API-->>Backoffice: 200 { status: OPEN }
+    Backoffice-->>Manager: "Orden #42 confirmada ✅ — enviada a cocina"
+
+    API->>Cliente: Push Notification "¡Tu pedido fue confirmado! 🍽️"
+```
+
+> [!IMPORTANT]
+> La re-autenticación con contraseña en cada acción sensible (confirmación manual, rechazo, void de orden) garantiza **trazabilidad de caja**: el sistema registra inequívocamente qué usuario tomó la decisión, cuándo y con qué notas. Esto protege al negocio en disputas y auditorías.
+
 ---
 
 ## 4. Contratos de API — Endpoints por módulo
@@ -417,6 +462,7 @@ sequenceDiagram
 |--------|----------|---------------|-------------|
 | `POST` | `/orders` | WAITER | Crear pedido |
 | `GET` | `/orders` | WAITER, MANAGER | Listar pedidos activos |
+| `GET` | `/orders?status=PAYMENT_REVIEW` | MANAGER, OWNER | Listar órdenes pendientes de confirmación manual |
 | `GET` | `/orders/:id` | Autenticado | Ver pedido |
 | `POST` | `/orders/:id/items` | WAITER | Agregar ítem |
 | `DELETE` | `/orders/:id/items/:itemId` | WAITER, MANAGER | Quitar ítem |
@@ -424,6 +470,8 @@ sequenceDiagram
 | `PATCH` | `/orders/:id/items/:itemId/status` | KITCHEN | Actualizar estado del ítem |
 | `PATCH` | `/orders/:id/deliver` | WAITER | Marcar entregado |
 | `POST` | `/orders/:id/cancel` | MANAGER | Cancelar pedido |
+| `POST` | `/orders/:id/confirm-payment` | MANAGER, OWNER | ⚠️ Confirmar pago manualmente — requiere re-auth con contraseña |
+| `POST` | `/orders/:id/reject-payment` | MANAGER, OWNER | ⚠️ Rechazar pago manualmente — requiere re-auth con contraseña |
 
 ### Payments
 | Método | Endpoint | Rol requerido | Descripción |
@@ -471,8 +519,12 @@ stateDiagram-v2
     [*] --> PENDING_PAYMENT : POST /public/:slug/orders (QR / app externa)
     [*] --> OPEN : POST /orders (mozo)
 
-    PENDING_PAYMENT --> OPEN : Webhook pago confirmado
-    PENDING_PAYMENT --> EXPIRED : Job — sin pago en 30 min
+    PENDING_PAYMENT --> OPEN          : Webhook pago confirmado
+    PENDING_PAYMENT --> EXPIRED       : Job 30 min — sin externalPaymentRef
+    PENDING_PAYMENT --> PAYMENT_REVIEW : Job 30 min — CON externalPaymentRef (pago probable)
+
+    PAYMENT_REVIEW --> OPEN      : MANAGER confirma manualmente (+ contraseña)
+    PAYMENT_REVIEW --> CANCELLED : MANAGER rechaza manualmente (+ contraseña)
 
     OPEN --> SENT_TO_KITCHEN : send-to-kitchen
     OPEN --> CANCELLED : cancel (MANAGER)
@@ -484,6 +536,7 @@ stateDiagram-v2
     DELIVERED --> PAID : createPayment
     PAID --> [*]
     EXPIRED --> [*]
+    CANCELLED --> [*]
 
     OPEN --> CANCELLED
     SENT_TO_KITCHEN --> CANCELLED
@@ -491,7 +544,9 @@ stateDiagram-v2
 ```
 
 > [!NOTE]
-> `PENDING_PAYMENT` y `EXPIRED` solo aplican a órdenes con `origin = QR` o `EXTERNAL_APP`. El kitchen display **nunca muestra** órdenes en estado `PENDING_PAYMENT` o `EXPIRED`. Las push notifications se envían al pasar a `OPEN` (pago confirmado) y a `READY` (pedido listo).
+> `PENDING_PAYMENT` y `EXPIRED` solo aplican a órdenes con `origin = QR` o `EXTERNAL_APP`. El kitchen display **nunca muestra** órdenes en estado `PENDING_PAYMENT`, `PAYMENT_REVIEW` ni `EXPIRED`. Las push notifications se envían al pasar a `OPEN` (pago confirmado) y a `READY` (pedido listo).
+>
+> La diferencia entre `EXPIRED` y `PAYMENT_REVIEW`: si a los 30 min la orden tiene `externalPaymentRef` (el cliente llegó a MP y probablemente pagó), pasa a `PAYMENT_REVIEW` para revisión manual del staff. Si no tiene referencia de pago (cliente abandonó antes de pagar), pasa directo a `EXPIRED`.
 
 ### Table Status
 
@@ -542,6 +597,10 @@ stateDiagram-v2
 | R13 | La sesión de mesa activa es la última orden no expirada/pagada de esa mesa | Orders | `OrdersService.getActiveSessionForTable()` |
 | R14 | Un nuevo comensal nunca ve órdenes anteriores — la sesión se resetea cuando la orden pasa a `PAID`, `CANCELLED` o `EXPIRED` | Orders | `OrdersService.getActiveSessionForTable()` |
 | R15 | La API Key de un restaurante solo puede acceder a los datos de ese restaurante | Public API | `ApiKeyGuard` — valida `restaurantId` del token vs recurso |
+| R16 | Confirmar o rechazar un pago manualmente requiere re-autenticación con contraseña del usuario que ejecuta la acción | Orders | `OrdersService.confirmPayment()` — verifica password antes de proceder |
+| R17 | Toda confirmación manual queda auditada: `paymentConfirmedById`, `paymentConfirmedAt`, `paymentConfirmedNotes` inmutables una vez registrados | Orders | `OrdersService.confirmPayment()` |
+| R18 | Si a los 30 min la orden `PENDING_PAYMENT` tiene `externalPaymentRef` → pasa a `PAYMENT_REVIEW` (revisión manual). Si no tiene referencia → pasa a `EXPIRED` (cliente abandonó sin pagar) | Orders | Job `OrdersService.expireStale()` |
+| R19 | Solo MANAGER u OWNER pueden ver y actuar sobre órdenes en `PAYMENT_REVIEW`. El WAITER no tiene acceso | Orders | `RolesGuard` en endpoints de confirmación |
 
 ---
 
@@ -582,6 +641,11 @@ stateDiagram-v2
 **Decisión:** La carta online (desarrollada por terceros) debe implementarse como PWA con Service Worker. GastroManager almacena la `pushSubscription` del browser junto con la orden y envía notificaciones push cuando el estado cambia a `OPEN` (pago confirmado) y `READY` (pedido listo).
 **Alternativa descartada:** Polling periódico del cliente al endpoint de estado.
 **Razón:** El Push Notification funciona con el browser/app cerrado, sin costo de infraestructura adicional y sin que el comensal provea datos personales. El polling genera carga innecesaria y no funciona con la app cerrada.
+
+### ADR-009: Step-up authentication para acciones sensibles de caja
+**Decisión:** Las acciones que afectan la trazabilidad contable del local (confirmación manual de pago, rechazo de pago, void de orden ya cerrada) requieren que el usuario re-ingrese su contraseña en el momento de ejecutarlas, aunque ya tenga sesión activa (JWT válido).
+**Alternativa descartada:** Confiar solo en el JWT existente + el rol del usuario.
+**Razón:** El JWT puede estar activo en un browser desatendido. La re-autenticación garantiza que fue una acción intencional de la persona correcta. Además, genera un registro inmutable (`paymentConfirmedById` + `paymentConfirmedAt` + notas) que protege al negocio en disputas, auditorías o inspecciones fiscales. Es el estándar en sistemas POS: los "manager overrides" siempre requieren PIN o contraseña.
 
 ---
 
