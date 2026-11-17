@@ -1,6 +1,7 @@
 export { AppError }             from './app-error.js';
 
 // Errores de dominio / negocio
+export { UnauthorizedError }     from './domain-errors.js';
 export { ResourceNotFoundError } from './domain-errors.js';
 export { ConflictDomainError }   from './domain-errors.js';
 export { ForbiddenDomainError }  from './domain-errors.js';

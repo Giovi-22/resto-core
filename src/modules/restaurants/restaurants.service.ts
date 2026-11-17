@@ -1,19 +1,18 @@
-import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Restaurant } from './entities/restaurant.entity.js';
 import { CreateRestaurantDto } from './dto/create-restaurant.dto.js';
 import { UpdateRestaurantDto } from './dto/update-restaurant.dto.js';
+import { ResourceNotFoundError, ConflictDomainError } from '../../common/errors/index.js';
+import { AppLoggerService, LogEvent } from '../../common/logger/index.js';
 
 @Injectable()
 export class RestaurantsService {
   constructor(
     @InjectRepository(Restaurant)
     private restaurantRepository: Repository<Restaurant>,
+    private readonly logger: AppLoggerService,
   ) {}
 
   private slugify(name: string): string {
@@ -28,20 +27,19 @@ export class RestaurantsService {
   async create(dto: CreateRestaurantDto): Promise<Restaurant> {
     const slug = dto.slug ?? this.slugify(dto.name);
 
-    const existing = await this.restaurantRepository.findOne({
-      where: { slug },
-    });
-
+    const existing = await this.restaurantRepository.findOne({ where: { slug } });
     if (existing) {
-      throw new ConflictException(`Ya existe un restaurante con el slug "${slug}"`);
+      throw new ConflictDomainError(
+        `Ya existe un restaurante con el slug "${slug}"`,
+        LogEvent.RESTAURANT,
+      );
     }
 
-    const restaurant = this.restaurantRepository.create({
-      ...dto,
-      slug,
-    });
+    const restaurant = this.restaurantRepository.create({ ...dto, slug });
+    const saved = await this.restaurantRepository.save(restaurant);
 
-    return this.restaurantRepository.save(restaurant);
+    this.logger.log(`Restaurante creado: ${saved.slug}`, LogEvent.RESTAURANT, RestaurantsService.name);
+    return saved;
   }
 
   async findAll(): Promise<Restaurant[]> {
@@ -52,12 +50,13 @@ export class RestaurantsService {
   }
 
   async findOne(id: string): Promise<Restaurant> {
-    const restaurant = await this.restaurantRepository.findOne({
-      where: { id },
-    });
+    const restaurant = await this.restaurantRepository.findOne({ where: { id } });
 
     if (!restaurant) {
-      throw new NotFoundException(`Restaurante con id "${id}" no encontrado`);
+      throw new ResourceNotFoundError(
+        `Restaurante con id "${id}" no encontrado`,
+        LogEvent.RESTAURANT,
+      );
     }
 
     return restaurant;
@@ -69,7 +68,10 @@ export class RestaurantsService {
     });
 
     if (!restaurant) {
-      throw new NotFoundException(`Restaurante "${slug}" no encontrado`);
+      throw new ResourceNotFoundError(
+        `Restaurante "${slug}" no encontrado`,
+        LogEvent.RESTAURANT,
+      );
     }
 
     return restaurant;
@@ -79,23 +81,26 @@ export class RestaurantsService {
     const restaurant = await this.findOne(id);
 
     if (dto.slug && dto.slug !== restaurant.slug) {
-      const existing = await this.restaurantRepository.findOne({
-        where: { slug: dto.slug },
-      });
+      const existing = await this.restaurantRepository.findOne({ where: { slug: dto.slug } });
       if (existing) {
-        throw new ConflictException(`El slug "${dto.slug}" ya está en uso`);
+        throw new ConflictDomainError(
+          `El slug "${dto.slug}" ya está en uso`,
+          LogEvent.RESTAURANT,
+        );
       }
     }
 
     Object.assign(restaurant, dto);
-    return this.restaurantRepository.save(restaurant);
+    const saved = await this.restaurantRepository.save(restaurant);
+
+    this.logger.log(`Restaurante actualizado: ${saved.slug}`, LogEvent.RESTAURANT, RestaurantsService.name);
+    return saved;
   }
 
   async remove(id: string): Promise<void> {
     const restaurant = await this.findOne(id);
-    // Soft delete: desactivar en lugar de borrar
     restaurant.isActive = false;
     await this.restaurantRepository.save(restaurant);
+    this.logger.log(`Restaurante desactivado: ${restaurant.slug}`, LogEvent.RESTAURANT, RestaurantsService.name);
   }
 }
-

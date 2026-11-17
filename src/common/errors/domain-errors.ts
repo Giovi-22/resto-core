@@ -3,6 +3,23 @@ import { LogEvent } from '../logger/log-event.enum.js';
 import { AppError } from './app-error.js';
 
 /**
+ * Credenciales inválidas o sesión no autenticada.
+ * → HTTP 401, siempre loguea como SECURITY
+ *
+ * @example
+ * throw new UnauthorizedError('Credenciales inválidas');
+ */
+export class UnauthorizedError extends AppError {
+  readonly statusCode = HttpStatus.UNAUTHORIZED;
+  readonly logEvent   = LogEvent.SECURITY;
+  readonly logLevel   = 'warn' as const;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+}
+
+/**
  * Entidad no encontrada en base de datos.
  * → HTTP 404
  *

@@ -1,35 +1,44 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
 import { JwtService } from '@nestjs/jwt';
 import { User, UserRole } from '../users/entities/user.entity.js';
+import { ConflictDomainError, UnauthorizedError } from '../../common/errors/index.js';
+import { AppLoggerService } from '../../common/logger/index.js';
 
-// ── Mock del repositorio de usuarios ──────────────────────────────
+// ── Mocks ─────────────────────────────────────────────────────────
 const mockUserRepository = {
   findOne: vi.fn(),
-  create: vi.fn(),
-  save: vi.fn(),
-  update: vi.fn(),
+  create:  vi.fn(),
+  save:    vi.fn(),
+  update:  vi.fn(),
 };
 
 const mockJwtService = {
   sign: vi.fn().mockReturnValue('mock-jwt-token'),
 };
 
+const mockLogger = {
+  log:     vi.fn(),
+  warn:    vi.fn(),
+  error:   vi.fn(),
+  debug:   vi.fn(),
+  verbose: vi.fn(),
+};
+
 // ── Helper: usuario de prueba ──────────────────────────────────────
 const buildMockUser = (overrides: Partial<User> = {}): User => {
-  const user = new User();
-  user.id = 'user-uuid-1';
-  user.email = 'test@example.com';
-  user.password = '$2b$12$hashedpassword';
-  user.firstName = 'Juan';
-  user.lastName = 'García';
-  user.role = UserRole.OWNER;
+  const user       = new User();
+  user.id          = 'user-uuid-1';
+  user.email       = 'test@example.com';
+  user.password    = '$2b$12$hashedpassword';
+  user.firstName   = 'Juan';
+  user.lastName    = 'García';
+  user.role        = UserRole.OWNER;
   user.restaurantId = null;
-  user.isActive = true;
-  user.lastLogin = null;
-  user.createdAt = new Date();
-  user.updatedAt = new Date();
+  user.isActive    = true;
+  user.lastLogin   = null;
+  user.createdAt   = new Date();
+  user.updatedAt   = new Date();
   user.validatePassword = vi.fn();
   return Object.assign(user, overrides);
 };
@@ -42,6 +51,7 @@ describe('AuthService', () => {
     authService = new AuthService(
       mockUserRepository as never,
       mockJwtService as unknown as JwtService,
+      mockLogger as unknown as AppLoggerService,
     );
   });
 
@@ -54,10 +64,10 @@ describe('AuthService', () => {
       mockUserRepository.save.mockResolvedValue(savedUser);
 
       const result = await authService.register({
-        email: 'test@example.com',
-        password: 'SecurePass123!',
+        email:     'test@example.com',
+        password:  'SecurePass123!',
         firstName: 'Juan',
-        lastName: 'García',
+        lastName:  'García',
       });
 
       expect(result.accessToken).toBe('mock-jwt-token');
@@ -65,17 +75,17 @@ describe('AuthService', () => {
       expect(mockUserRepository.save).toHaveBeenCalledOnce();
     });
 
-    it('debe lanzar ConflictException si el email ya existe', async () => {
+    it('debe lanzar ConflictDomainError si el email ya existe', async () => {
       mockUserRepository.findOne.mockResolvedValue(buildMockUser());
 
       await expect(
         authService.register({
-          email: 'test@example.com',
-          password: 'SecurePass123!',
+          email:     'test@example.com',
+          password:  'SecurePass123!',
           firstName: 'Juan',
-          lastName: 'García',
+          lastName:  'García',
         }),
-      ).rejects.toThrow(ConflictException);
+      ).rejects.toThrow(ConflictDomainError);
     });
   });
 
@@ -88,7 +98,7 @@ describe('AuthService', () => {
       mockUserRepository.update.mockResolvedValue(undefined);
 
       const result = await authService.login({
-        email: 'test@example.com',
+        email:    'test@example.com',
         password: 'SecurePass123!',
       });
 
@@ -99,23 +109,22 @@ describe('AuthService', () => {
       );
     });
 
-    it('debe lanzar UnauthorizedException si el usuario no existe', async () => {
+    it('debe lanzar UnauthorizedError si el usuario no existe', async () => {
       mockUserRepository.findOne.mockResolvedValue(null);
 
       await expect(
         authService.login({ email: 'no@existe.com', password: '123' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(UnauthorizedError);
     });
 
-    it('debe lanzar UnauthorizedException si la contraseña es incorrecta', async () => {
+    it('debe lanzar UnauthorizedError si la contraseña es incorrecta', async () => {
       const user = buildMockUser();
       (user.validatePassword as ReturnType<typeof vi.fn>).mockResolvedValue(false);
       mockUserRepository.findOne.mockResolvedValue(user);
 
       await expect(
         authService.login({ email: 'test@example.com', password: 'wrong' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(UnauthorizedError);
     });
   });
 });
-

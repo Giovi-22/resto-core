@@ -698,12 +698,12 @@ stateDiagram-v2
 |--------|---------|---------|------------|-------|-------------|
 | Auth | ✅ | ✅ | ✅ | ✅ | — |
 | Restaurants | ✅ | ✅ | ✅ | ✅ | — |
-| Users | ✅ | ⬜ | ⬜ | ⬜ | — |
-| Zones | ⬜ | ⬜ | ⬜ | ⬜ | — |
-| Tables | ⬜ | ⬜ | ⬜ | ⬜ | — |
-| Menu/Categories | ⬜ | ⬜ | ⬜ | ⬜ | — |
-| Menu/Products | ⬜ | ⬜ | ⬜ | ⬜ | — |
-| Modifiers | ⬜ | ⬜ | ⬜ | ⬜ | — |
+| Users | ✅ | ✅ | ✅ | ✅ | — |
+| Zones | ✅ | ✅ | ✅ | ✅ | — |
+| Tables | ✅ | ✅ | ✅ | ✅ | — |
+| Menu/Categories | ✅ | ✅ | ✅ | ✅ | — |
+| Menu/Products | ✅ | ✅ | ✅ | ✅ | — |
+| Modifiers | ✅ | ✅ | ✅ | ✅ | — |
 | Orders | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | Order Items | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | Payments | ⬜ | ⬜ | ⬜ | ⬜ | — |
