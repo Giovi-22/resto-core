@@ -67,11 +67,32 @@ erDiagram
         string name
         string description
         decimal price
+        decimal cost       "calculado: SUM(ingredient.unitCost * recipeItem.quantity)"
         string imageUrl
         int preparationTime
         bool isAvailable
         uuid categoryId FK
         uuid restaurantId FK
+    }
+
+    INGREDIENT {
+        uuid id PK
+        string name        "queso mozzarella, pan de milanesa, etc."
+        string description
+        enum unit          "KG | G | L | ML | UNIT"
+        decimal unitCost   "costo por unidad de compra"
+        decimal stock      "stock actual - Fase 4"
+        decimal minStock   "umbral de alerta - Fase 4"
+        bool isActive
+        uuid restaurantId FK
+    }
+
+    RECIPE_ITEM {
+        uuid id PK
+        decimal quantity   "cuanto se usa en esta receta (en la unidad del ingrediente)"
+        string notes       "opcional: indicaciones de preparacion"
+        uuid productId FK
+        uuid ingredientId FK
     }
 
     MODIFIER_GROUP {
@@ -161,6 +182,10 @@ erDiagram
     PRODUCT ||--o{ MODIFIER_GROUP : "tiene"
     MODIFIER_GROUP ||--o{ MODIFIER : "ofrece"
 
+    PRODUCT ||--o{ RECIPE_ITEM : "se elabora con"
+    RECIPE_ITEM }o--|| INGREDIENT : "usa"
+    RESTAURANT ||--o{ INGREDIENT : "gestiona"
+
     TABLE ||--o{ ORDER : "genera"
 
     ORDER ||--o{ ORDER_ITEM : "contiene"
@@ -190,11 +215,13 @@ graph TD
         REST[RestaurantsModule]
         USERS[UsersModule]
         MENU[MenuModule]
+        RECIPES[RecipesModule]
         TABLES[TablesModule]
         ORDERS[OrdersModule]
         PAYMENTS[PaymentsModule]
         KITCHEN[KitchenModule - WebSocket]
         REPORTS[ReportsModule]
+        INVENTORY[InventoryModule - Fase 4]
     end
 
     CONFIG --> DB
@@ -206,6 +233,8 @@ graph TD
     REST --> USERS
 
     MENU --> REST
+    RECIPES --> MENU
+
     TABLES --> REST
     TABLES --> MENU
 
@@ -213,6 +242,7 @@ graph TD
     ORDERS --> MENU
     ORDERS --> USERS
     ORDERS --> REST
+    ORDERS --> INVENTORY
 
     PAYMENTS --> ORDERS
     PAYMENTS --> USERS
@@ -222,6 +252,10 @@ graph TD
     REPORTS --> ORDERS
     REPORTS --> PAYMENTS
     REPORTS --> MENU
+    REPORTS --> RECIPES
+
+    INVENTORY --> RECIPES
+    INVENTORY --> MENU
 ```
 
 > [!IMPORTANT]
@@ -601,6 +635,10 @@ stateDiagram-v2
 | R17 | Toda confirmación manual queda auditada: `paymentConfirmedById`, `paymentConfirmedAt`, `paymentConfirmedNotes` inmutables una vez registrados | Orders | `OrdersService.confirmPayment()` |
 | R18 | Si a los 30 min la orden `PENDING_PAYMENT` tiene `externalPaymentRef` → pasa a `PAYMENT_REVIEW` (revisión manual). Si no tiene referencia → pasa a `EXPIRED` (cliente abandonó sin pagar) | Orders | Job `OrdersService.expireStale()` |
 | R19 | Solo MANAGER u OWNER pueden ver y actuar sobre órdenes en `PAYMENT_REVIEW`. El WAITER no tiene acceso | Orders | `RolesGuard` en endpoints de confirmación |
+| R20 | Las recetas y los costos de insumos son internos — nunca se exponen en la Public API ni en la carta del comensal | Recipes | `RecipesController` sin ruta pública |
+| R21 | El costo del producto se recalcula automáticamente cuando cambia el `unitCost` de un ingrediente o se modifica su receta | Recipes | `RecipesService.recalculateCost()` |
+| R22 | Un ingrediente no puede eliminarse si está siendo usado en alguna receta activa | Recipes | `IngredientsService.remove()` |
+| R23 | El descuento de stock por venta (Fase 4) solo aplica cuando la orden pasa a `OPEN` — nunca en `PENDING_PAYMENT` | Inventory | `InventoryService.deductFromOrder()` |
 
 ---
 
@@ -647,6 +685,11 @@ stateDiagram-v2
 **Alternativa descartada:** Confiar solo en el JWT existente + el rol del usuario.
 **Razón:** El JWT puede estar activo en un browser desatendido. La re-autenticación garantiza que fue una acción intencional de la persona correcta. Además, genera un registro inmutable (`paymentConfirmedById` + `paymentConfirmedAt` + notas) que protege al negocio en disputas, auditorías o inspecciones fiscales. Es el estándar en sistemas POS: los "manager overrides" siempre requieren PIN o contraseña.
 
+### ADR-010: Recetas separadas de Inventario aunque comparten el modelo de Insumos
+**Decisión:** `RecipesModule` (gestión de recetas y cálculo de costos) se implementa en Fase 3 de forma independiente de `InventoryModule` (Fase 4). Ambos usan la misma entidad `INGREDIENT` y `RECIPE_ITEM`, pero son módulos distintos.
+**Alternativa descartada:** Implementar recetas e inventario juntos en una sola fase.
+**Razón:** El cálculo de costos (recetas) aporta valor inmediato al dueño del restaurante desde Fase 3 sin necesidad de rastrear stock. El descuento automático de stock al confirmar una orden es funcionalidad adicional que se activa sola en Fase 4 sin romper el modelo existente. Separar los módulos permite entregar valor incremental y reduce el riesgo de Fase 3.
+
 ---
 
 ## 8. Estado de Implementación
@@ -667,10 +710,13 @@ stateDiagram-v2
 | Cash Register | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | Kitchen WS | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | Reports | ⬜ | ⬜ | ⬜ | ⬜ | — |
+| **Ingredients** | ⬜ | ⬜ | ⬜ | ⬜ | — |
+| **Recipes** | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | **Public API** | — | ⬜ | ⬜ | ⬜ | — |
 | **API Keys** | ⬜ | ⬜ | ⬜ | ⬜ | — |
 | **Webhooks (MP)** | — | ⬜ | ⬜ | ⬜ | — |
 | **Push Notifications** | — | ⬜ | — | ⬜ | — |
 | **Expire Job (schedule)** | — | ⬜ | — | ⬜ | — |
+| **Inventory (Fase 4)** | ⬜ | ⬜ | ⬜ | ⬜ | — |
 
 ✅ Hecho · 🔄 En progreso · ⬜ Pendiente
